@@ -64,7 +64,7 @@ rosa login --token=<your-token>
 ocm login --token=<your-token>
 
 # Get cluster details
-rosa describe cluster $CLUSTER_NAME
+rosa describe cluster -c $CLUSTER_NAME
 ```
 
 **Expected Output:**
