@@ -90,7 +90,7 @@ Hosted CP:                  Yes
 #### Check Cluster Status
 ```bash
 # Check overall cluster status
-rosa describe cluster $CLUSTER_NAME --output json | jq '.state'
+rosa describe cluster -c $CLUSTER_NAME --output json | jq '.state'
 
 # List all clusters
 rosa list clusters
@@ -122,7 +122,7 @@ ip-10-0-2-200.us-east-1.compute.internal    Ready    worker   2h    v1.27.8+4fab
 #### Get VPC Information
 ```bash
 # Get cluster subnet information
-SUBNET_IDS=$(rosa describe cluster $CLUSTER_NAME --output json | jq -r '.aws.subnet_ids[]' | tr '\n' ' ')
+SUBNET_IDS=$(rosa describe cluster -c $CLUSTER_NAME --output json | jq -r '.aws.subnet_ids[]' | tr '\n' ' ')
 echo "Subnet IDs: $SUBNET_IDS"
 
 # Get VPC ID from subnets
