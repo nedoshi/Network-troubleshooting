@@ -1,7 +1,7 @@
 # ROSA HCP Cluster - Calico CNI Clean Installation Guide
 
 ## Cluster Information
-- **Cluster API**: `api.nddemo.qftf.p3.openshiftapps.com`
+- **Cluster API**: `api.domain.openshiftapps.com`
 - **Service IP**: `172.30.0.1`
 - **Pod CIDR**: `10.128.0.0/14`
 
