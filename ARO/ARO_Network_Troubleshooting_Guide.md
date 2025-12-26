@@ -6,22 +6,54 @@ Complete guide for diagnosing and fixing networking and DNS issues in private AR
 
 ## Table of Contents
 
-1. [Verify Cluster Status and Basic Connectivity](#1-verify-cluster-status-and-basic-connectivity)
-2. [DNS Resolution Testing](#2-dns-resolution-testing)
-3. [Network Security Group (NSG) Rules Validation](#3-network-security-group-nsg-rules-validation)
-4. [Virtual Network and Subnet Configuration](#4-virtual-network-and-subnet-configuration)
-5. [Service Endpoints and Private Link](#5-service-endpoints-and-private-link)
-6. [ARO Private Cluster API Access](#6-aro-private-cluster-api-access)
-7. [CoreDNS and Cluster DNS Issues](#7-coredns-and-cluster-dns-issues)
-8. [SDN/OVN Network Plugin Issues](#8-sdnovn-network-plugin-issues)
-9. [Pod-to-Pod and Pod-to-Service Connectivity](#9-pod-to-pod-and-pod-to-service-connectivity)
-10. [Ingress and Router Issues](#10-ingress-and-router-issues)
-11. [Azure Load Balancer Configuration](#11-azure-load-balancer-configuration)
-12. [Azure Private DNS Zone Configuration](#12-azure-private-dns-zone-configuration)
-13. [Check Cluster Network Configuration](#13-check-cluster-network-configuration)
-14. [Diagnostic Collection](#14-diagnostic-collection)
-15. [Common Issues Quick Reference](#common-issues-quick-reference)
-16. [Quick Diagnostic Script](#quick-diagnostic-script)
+1. [Overview](#overview)
+2. [Prerequisites](#prerequisites)
+3. [Verify Cluster Status and Basic Connectivity](#1-verify-cluster-status-and-basic-connectivity)
+4. [DNS Resolution Testing](#2-dns-resolution-testing)
+5. [Network Security Group (NSG) Rules Validation](#3-network-security-group-nsg-rules-validation)
+6. [Virtual Network and Subnet Configuration](#4-virtual-network-and-subnet-configuration)
+7. [Service Endpoints and Private Link](#5-service-endpoints-and-private-link)
+8. [ARO Private Cluster API Access](#6-aro-private-cluster-api-access)
+9. [CoreDNS and Cluster DNS Issues](#7-coredns-and-cluster-dns-issues)
+10. [SDN/OVN Network Plugin Issues](#8-sdnovn-network-plugin-issues)
+11. [Pod-to-Pod and Pod-to-Service Connectivity](#9-pod-to-pod-and-pod-to-service-connectivity)
+12. [Ingress and Router Issues](#10-ingress-and-router-issues)
+13. [Azure Load Balancer Configuration](#11-azure-load-balancer-configuration)
+14. [Azure Private DNS Zone Configuration](#12-azure-private-dns-zone-configuration)
+15. [Check Cluster Network Configuration](#13-check-cluster-network-configuration)
+16. [Container Registry Access](#16-container-registry-access)
+17. [Diagnostic Collection](#14-diagnostic-collection)
+18. [Common Issues Quick Reference](#common-issues-quick-reference)
+19. [Quick Diagnostic Script](#quick-diagnostic-script)
+20. [Advanced Troubleshooting](#advanced-troubleshooting)
+21. [Prevention and Best Practices](#prevention-and-best-practices)
+
+---
+
+## Overview
+
+Azure Red Hat OpenShift (ARO) private clusters require careful network configuration to ensure proper connectivity between cluster components, Azure services, and external resources. This guide provides systematic troubleshooting steps for common networking issues in private ARO deployments.
+
+### Key Network Components
+
+- **Private Subnets**: Master and worker nodes in private subnets
+- **Network Security Groups (NSGs)**: Control inbound/outbound traffic
+- **Service Endpoints**: Direct connectivity to Azure services
+- **Private DNS Zones**: Internal DNS resolution
+- **Load Balancers**: Internal and external load balancing
+- **Private Link**: Secure connection to Azure services
+
+---
+
+## Prerequisites
+
+Before troubleshooting, ensure you have:
+- Azure CLI installed and authenticated (`az login`)
+- OpenShift CLI (`oc`) installed
+- kubectl installed
+- Appropriate RBAC permissions for ARO cluster and Azure resources
+- Access to Azure portal or Azure CLI for network diagnostics
+- Access to cluster via VPN, Bastion, or Jumpbox (for private clusters)
 
 ---
 
@@ -37,6 +69,7 @@ az aro show --name <cluster-name> --resource-group <rg-name>
 - `provisioningState`: Should be "Succeeded"
 - `clusterProfile.domain`: Your cluster domain
 - `networkProfile`: Verify CIDR ranges don't conflict
+- `apiserverProfile`: Check API server visibility and URL
 
 ### Check OpenShift Status
 
@@ -56,6 +89,16 @@ oc describe clusteroperator <operator-name>
 
 # Check for degraded operators
 oc get co | grep -v "True.*False.*False"
+```
+
+### Check API Server Visibility
+
+```bash
+# Verify API server endpoint
+az aro show --name <cluster-name> --resource-group <rg-name> --query apiserverProfile
+
+# Test connectivity to API server
+curl -k https://<api-server-url>:6443/healthz
 ```
 
 ---
@@ -105,6 +148,16 @@ oc get configmap/dns-default -n openshift-dns -o yaml
 oc describe configmap dns-default -n openshift-dns
 ```
 
+### Validate Private DNS Resolution
+
+```bash
+# Check if private DNS zone exists
+az network private-dns zone list --resource-group <rg-name>
+
+# Verify DNS records
+az network private-dns record-set a list --zone-name <private-dns-zone> --resource-group <rg-name>
+```
+
 ---
 
 ## 3. Network Security Group (NSG) Rules Validation
@@ -117,6 +170,9 @@ az network nsg list --resource-group <aro-rg> -o table
 
 # Show NSG rules
 az network nsg rule list --nsg-name <nsg-name> --resource-group <aro-rg> -o table
+
+# List NSG rules for master subnet
+az network nsg rule list --nsg-name <master-nsg-name> --resource-group <rg-name> --output table
 ```
 
 ### Required NSG Rules
@@ -125,11 +181,13 @@ az network nsg rule list --nsg-name <nsg-name> --resource-group <aro-rg> -o tabl
 - Port 6443 (API server) - from your access location
 - Port 443 (Ingress) - from your access location
 - Port 80 (HTTP Ingress) - optional
+- Port 22 (SSH) - for management (if needed)
 
 **Outbound Rules:**
 - Port 443 to Azure services
 - Port 445 (Azure Files)
 - Ports 1194, 9000-9999 for Azure services
+- Port 53 (DNS) for name resolution
 
 ### Fix NSG Issues
 
@@ -169,6 +227,18 @@ az network nsg rule create \
   --protocol Tcp \
   --destination-port-ranges 443 \
   --destination-address-prefixes AzureCloud
+```
+
+### Verify Egress Rules
+
+```bash
+# Check worker node NSG rules
+az network nsg rule list --nsg-name <worker-nsg-name> --resource-group <rg-name>
+
+# Ensure required outbound rules exist:
+# - Port 443 (HTTPS) for container registries
+# - Port 80 (HTTP) for package repositories
+# - DNS ports (53) for name resolution
 ```
 
 ---
@@ -221,6 +291,16 @@ az network vnet subnet update \
   --disable-private-link-service-network-policies true
 ```
 
+### Check Route Tables
+
+```bash
+# Verify route tables for subnets
+az network route-table list --resource-group <rg-name>
+
+# Check routes for worker subnet
+az network route-table route list --route-table-name <route-table-name> --resource-group <rg-name>
+```
+
 ---
 
 ## 5. Service Endpoints and Private Link
@@ -264,6 +344,13 @@ az network vnet subnet update \
   --vnet-name <vnet-name> \
   --resource-group <vnet-rg> \
   --service-endpoints Microsoft.ContainerRegistry Microsoft.Storage
+```
+
+### Check Private Endpoints
+
+```bash
+# Verify private endpoints for ACR if using private link
+az network private-endpoint list --resource-group <rg-name>
 ```
 
 ---
@@ -395,6 +482,17 @@ oc edit dns.operator/default
 #         - 8.8.4.4
 ```
 
+### Test DNS Resolution
+
+```bash
+# Create test pod for network diagnostics
+oc run network-test --image=busybox --rm -it -- sh
+
+# Inside the pod, test DNS resolution
+nslookup kubernetes.default.svc.cluster.local
+nslookup google.com
+```
+
 ---
 
 ## 8. SDN/OVN Network Plugin Issues
@@ -445,6 +543,13 @@ oc delete pod -n openshift-ovn-kubernetes -l app=ovnkube-master
 
 # Check network operator logs
 oc logs -n openshift-network-operator deployment/network-operator
+```
+
+### Examine CNI Configuration
+
+```bash
+# Check CNI configuration
+oc get pods -n openshift-multus
 ```
 
 ---
@@ -518,6 +623,17 @@ ovs-vsctl show
 # Exit debug pod
 exit
 exit
+```
+
+### Test Inter-Node Connectivity
+
+```bash
+# Create test pods on different nodes
+oc run test-pod-1 --image=busybox --command -- sleep 3600
+oc run test-pod-2 --image=busybox --command -- sleep 3600
+
+# Test connectivity between pods
+oc exec test-pod-1 -- ping <test-pod-2-ip>
 ```
 
 ### Clean Up Test Pods
@@ -594,6 +710,16 @@ curl -I http://$(oc get route test-app -o jsonpath='{.spec.host}')
 oc delete all -l app=test-app
 ```
 
+### Check Service Endpoints
+
+```bash
+# Check service endpoints
+oc get endpoints -n <namespace>
+
+# Verify service configuration
+oc describe service <service-name> -n <namespace>
+```
+
 ---
 
 ## 11. Azure Load Balancer Configuration
@@ -645,6 +771,16 @@ oc describe svc router-default -n openshift-ingress
 
 # Check service annotations
 oc get svc router-default -n openshift-ingress -o yaml | grep -A 5 annotations
+```
+
+### Examine Load Balancer Configuration
+
+```bash
+# Check Azure Load Balancer resources
+az network lb list --resource-group <node-rg-name>
+
+# Verify load balancer rules and health probes
+az network lb rule list --lb-name <lb-name> --resource-group <node-rg-name>
 ```
 
 ---
@@ -783,6 +919,42 @@ If there are CIDR conflicts, you must:
 
 ---
 
+## 16. Container Registry Access
+
+### Symptoms
+- Image pull failures
+- Authentication errors to Azure Container Registry
+- Timeout errors during image pulls
+
+### Verify Registry Configuration
+
+```bash
+# Check image pull secrets
+oc get secrets --all-namespaces | grep pull-secret
+
+# Verify registry configuration
+oc get image.config.openshift.io/cluster -o yaml
+```
+
+### Test Registry Connectivity
+
+```bash
+# Create test pod to verify registry access
+oc run registry-test --image=busybox --rm -it -- sh
+
+# Test connection to Azure Container Registry
+wget -q --spider https://<registry-name>.azurecr.io
+```
+
+### Check Service Endpoints for Container Registry
+
+```bash
+# Verify private endpoints for ACR if using private link
+az network private-endpoint list --resource-group <rg-name>
+```
+
+---
+
 ## 14. Diagnostic Collection
 
 ### Collect Must-Gather Data
@@ -844,6 +1016,26 @@ oc get dns.operator default -o yaml > dns-config.yaml
 
 # Export all cluster operators
 oc get clusteroperators -o yaml > clusteroperators.yaml
+```
+
+### Azure Network Diagnostics
+
+```bash
+# Network Watcher connection troubleshoot
+az network watcher test-connectivity \
+  --source-resource <vm-resource-id> \
+  --dest-address <destination-ip> \
+  --dest-port <port>
+
+# Check effective routes
+az network nic show-effective-route-table \
+  --name <nic-name> \
+  --resource-group <rg-name>
+
+# Verify security rules
+az network nic list-effective-nsg \
+  --name <nic-name> \
+  --resource-group <rg-name>
 ```
 
 ---
@@ -963,6 +1155,18 @@ nslookup api.<cluster-name>.<random-string>.<region>.aroapp.io
 3. Verify A records exist for api and *.apps
 4. Ensure DNS queries are using Azure DNS (168.63.129.16)
 
+### Issue 7: Image Pull Failures
+
+**Symptoms:**
+- Pods stuck in ImagePullBackOff
+- Authentication errors to container registry
+
+**Fixes:**
+1. Check image pull secrets: `oc get secrets --all-namespaces | grep pull-secret`
+2. Verify service endpoints for ACR are configured
+3. Check private endpoint connectivity if using private link
+4. Test registry access from a pod
+
 ---
 
 ## Quick Diagnostic Script
@@ -1026,4 +1230,118 @@ oc get svc -n openshift-ingress
 echo ""
 
 echo "=== Network Configuration ==="
-oc get network.config.openshift.io cluster -o yaml | grep -A 10 "clusterNetwork\|serviceNetwork
+oc get network.config.openshift.io cluster -o yaml | grep -A 10 "clusterNetwork\|serviceNetwork"
+```
+
+---
+
+## Advanced Troubleshooting
+
+### Packet Capture Analysis
+
+```bash
+# Enable packet capture on worker nodes (requires node debugging)
+oc debug node/<node-name>
+
+# Inside the debug pod:
+chroot /host
+tcpdump -i any -w /tmp/capture.pcap host <target-ip>
+```
+
+### Network Performance Testing
+
+```bash
+# Create iperf3 server pod
+oc create -f - <<EOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: iperf3-server
+spec:
+  containers:
+  - name: iperf3-server
+    image: networkstatic/iperf3
+    command: ["/bin/sh", "-c", "iperf3 -s"]
+    ports:
+    - containerPort: 5201
+EOF
+
+# Create iperf3 client pod and test
+oc run iperf3-client --image=networkstatic/iperf3 --rm -it -- iperf3 -c <server-pod-ip>
+```
+
+### Network Flow Analysis
+
+```bash
+# Enable VPC flow logs
+aws ec2 create-flow-logs \
+  --resource-type VPC \
+  --resource-ids $CLUSTER_VPC \
+  --traffic-type ALL \
+  --log-destination-type cloud-watch-logs \
+  --log-group-name /aws/vpc/flowlogs
+```
+
+---
+
+## Prevention and Best Practices
+
+### Network Security
+
+1. **Implement Network Policies**: Use Kubernetes NetworkPolicies to control pod-to-pod communication
+2. **Regular Security Review**: Periodically review NSG rules and remove unnecessary access
+3. **Monitor Traffic**: Use Azure Network Watcher and OpenShift monitoring to track network traffic
+
+### Configuration Management
+
+1. **Document Network Architecture**: Maintain up-to-date network diagrams and IP allocation schemes
+2. **Version Control**: Store network configurations in version control systems
+3. **Automated Testing**: Implement automated network connectivity tests
+
+### Monitoring Setup
+
+```bash
+# Check network metrics in Prometheus
+oc get prometheus -n openshift-monitoring
+
+# Query network-related metrics
+oc exec -n openshift-monitoring prometheus-k8s-0 -- \
+  promtool query instant 'container_network_receive_bytes_total'
+```
+
+### Collect Network Logs
+
+```bash
+# Collect SDN logs
+oc logs -n openshift-sdn -l app=sdn --tail=100
+
+# Collect DNS logs
+oc logs -n openshift-dns -l dns.operator.openshift.io/daemonset-dns=default
+
+# Collect ingress controller logs
+oc logs -n openshift-ingress-operator deployment/ingress-operator
+```
+
+### Common Error Codes and Solutions
+
+| Error Code | Description | Solution |
+|------------|-------------|----------|
+| DNS_PROBE_FINISHED_NXDOMAIN | DNS resolution failure | Check DNS configuration and private DNS zones |
+| Connection timeout | Network connectivity issues | Verify NSG rules and route tables |
+| Image pull failed | Registry access issues | Check service endpoints and authentication |
+| Service unavailable | Load balancer configuration | Verify Azure Load Balancer settings |
+
+---
+
+## Additional Resources
+
+- [Azure Red Hat OpenShift Documentation](https://docs.microsoft.com/en-us/azure/openshift/)
+- [OpenShift Network Troubleshooting](https://docs.openshift.com/container-platform/4.12/networking/troubleshooting-network-issues.html)
+- [Azure Network Troubleshooting](https://docs.microsoft.com/en-us/azure/virtual-network/troubleshoot-connectivity-problem-between-vms)
+
+---
+
+## Conclusion
+
+Network troubleshooting in ARO private clusters requires understanding both Azure networking components and OpenShift network architecture. Use this guide systematically, starting with basic connectivity tests and progressing to more advanced diagnostics as needed. Always document your findings and implement monitoring to prevent future issues.
+
